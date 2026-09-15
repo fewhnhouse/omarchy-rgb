@@ -6,9 +6,12 @@ A small background service for Omarchy Quattro, powered by OpenRGB.
 - Syncs when the shell starts and when the theme accent changes.
 - Reapplies after resume and USB/HID changes, with delayed recovery attempts.
 - Checks for wireless devices returning every 60 seconds without rewriting unchanged lighting.
-- Select devices by name, with a separate OpenRGB mode for each device.
+- Automatically includes detected devices with Direct or Static lighting modes.
+- Optional exclusions, explicit device selection, and brightness settings.
 - Optional brightness scaling, including devices without a brightness control.
-- Debounces rapid changes, serializes calls, and limits OpenRGB runs to 30 seconds.
+- Debounces rapid changes and serializes syncs.
+- Applies each device name group independently, with a 15-second timeout per update.
+- Retries failures without rewriting unchanged successful devices.
 - Skips configured devices absent from a fresh OpenRGB scan.
 - Optional local OpenRGB server for devices that restore onboard colors when OpenRGB exits.
 - No bar widget, root process, or automatic package installation.
@@ -45,31 +48,54 @@ Use OpenRGB's documented device access setup if they do not appear:
 omarchy plugin add https://github.com/fewhnhouse/omarchy-rgb.git --enable
 ```
 
-Manual setup is required: add `devices` to this plugin's existing entry in
-`plugins` in `~/.config/omarchy/shell.json`. Keep the rest of your config intact.
-No devices are controlled until you choose them. Example:
+After installing OpenRGB and enabling the plugin, compatible detected devices
+are selected automatically. You do not need to open a panel or copy device names.
+The plugin uses Direct mode where supported and Static as a fallback. Devices
+without either mode are left alone. Hardware access must already work in OpenRGB.
+
+### Optional settings
+
+To customize behavior, add fields to the plugin's existing entry in `plugins`
+in `~/.config/omarchy/shell.json`. Preserve the rest of your configuration:
 
 ```json
 {
   "id": "io.github.fewhnhouse.omarchy-rgb",
+  "managedServer": true,
   "brightness": 100,
+  "disabledDevices": [],
+  "reconnectIntervalSec": 60
+}
+```
+
+- `brightness`: 0–100, default 100. Scales RGB channel values.
+- `disabledDevices`: exact names to exclude from automatic selection.
+- `reconnectIntervalSec`: wireless discovery interval, default 60, minimum 15.
+- `managedServer`: keeps OpenRGB running locally; see below. Default false.
+- `paused`: stops automatic updates without changing the current lights. Default false.
+
+For explicit selection or a different mode, supply a `devices` array instead:
+
+```json
+{
+  "id": "io.github.fewhnhouse.omarchy-rgb",
   "devices": [
     { "name": "G515 LS TKL", "mode": "Direct" },
-    { "name": "Corsair Dominator Platinum RGB DDR5", "mode": "Direct" },
-    { "name": "Gigabyte GeForce RTX 4070 SUPER GAMING OC", "mode": "Direct" }
+    { "name": "Corsair Dominator Platinum RGB DDR5", "mode": "Direct" }
   ]
 }
 ```
 
-Replace these example names with your hardware. OpenRGB name selectors match
-substrings, so use full names to avoid selecting unrelated devices. Identical
-names select all matching devices (for example, both RAM sticks). Numeric device
-indices are intentionally rejected because enumeration order can change.
+An explicit `devices` list disables automatic selection unless `autoDetect` is
+set to true. Remove the list to return to automatic selection. An empty explicit
+list selects nothing. Modes must be supported by the matched hardware.
 
-`mode` defaults to `Direct`; use a mode reported by your device, such as `Static`,
-if Direct is unavailable. Brightness is a percentage from 0 to 100, applied to
-RGB channel values. The default is 100. Settings reload with the shell config.
-`reconnectIntervalSec` controls wireless device discovery (default 60, minimum 15).
+OpenRGB name selectors match substrings. Use full names to avoid selecting
+unrelated devices. Identical names form one group (for example, both RAM sticks),
+so failure isolation is between name groups, not between individual LEDs or
+identically named devices. A selector that would also match an excluded device
+is skipped and logged. Numeric selectors are rejected because enumeration order
+can change. Settings reload when shell.json changes.
 
 ### Keyboard colors revert after a while
 
@@ -94,16 +120,18 @@ the latest settings and palette. It writes its lock, latest log, and last
 successfully applied device/color snapshot under
 `${XDG_STATE_HOME:-~/.local/state}/omarchy-rgb/`.
 
-Each sync scans devices, then applies the color to available selections. Each
-OpenRGB process has a 30-second timeout (up to 60 seconds total). A device that
-disconnects between scanning and applying can still cause OpenRGB to report an
-error; the next theme change or plugin restart tries again.
+Each sync scans devices once (30-second timeout), then updates each selected
+name group separately (15-second timeout per group). A missing device, invalid
+mode, nonzero exit, or timeout is recorded without blocking other groups.
+The log and helper result identify partial failures. Periodic checks retry failed
+groups while retaining successful groups in the cache; unchanged successful
+lighting is not rewritten. A discovery failure prevents updates for that run.
 
 Resume signals from logind and USB/HID events trigger recovery after 2 seconds
 and again after 15 seconds to allow controllers to initialize. Periodic discovery
 catches wireless devices whose receiver stays plugged in. Discovery compares
-selected device names (including duplicate counts), settings, and colors with
-the last successful apply; unchanged lighting is not rewritten. A device that
+each selected name group (including duplicate counts), settings, and colors with
+its last successful apply; unchanged lighting is not rewritten. A device that
 resets internally without an event or any detectable absence cannot be identified
 by discovery alone. Toggle the plugin off/on to force an update in that case.
 
@@ -135,10 +163,10 @@ Missing dependencies, malformed settings, unsupported modes, and device access
 errors are reported there and in the shell log. An OpenRGB exit code of zero
 means the command completed, not proof that every physical LED changed.
 
-For a manual run from a checkout:
+For a manual run from a checkout using the local managed server:
 
 ```bash
-python3 sync.py --settings '{"devices":[{"name":"G515 LS TKL","mode":"Direct"}]}'
+python3 sync.py --settings '{"managedServer":true}'
 ```
 
 ## Update or remove

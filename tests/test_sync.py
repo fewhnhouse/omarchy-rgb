@@ -12,6 +12,78 @@ spec.loader.exec_module(sync)
 
 
 class SyncTests(unittest.TestCase):
+    def test_automatic_discovery_groups_devices_and_falls_back_to_static(self):
+        inventory = sync.parse_inventory("0: Keyboard\n  Type: Keyboard\n  Modes: [Direct] Static 'Color Wave'\n"
+                                         "1: RAM\n  Type: DRAM\n  Modes: [Static]\n"
+                                         "2: RAM\n  Type: DRAM\n  Modes: [Static]\n"
+                                         "3: Unsupported\n  Modes: [Rainbow]\n")
+        self.assertEqual(inventory[0]['modes'], ['Direct', 'Static', 'Color Wave'])
+        self.assertEqual(inventory[1]['count'], 2)
+        self.assertEqual(sync.select_devices({}, inventory), [{'name': 'Keyboard', 'mode': 'Direct'},
+                                                              {'name': 'RAM', 'mode': 'Static'}])
+        self.assertEqual(sync.select_devices({'disabledDevices': ['Keyboard']}, inventory),
+                         [{'name': 'RAM', 'mode': 'Static'}])
+        self.assertEqual(sync.select_devices({'disabledDevices': ['Keyboard', 'RAM']}, inventory), [])
+
+    def test_pause_does_not_contact_hardware(self):
+        with patch.object(sync.subprocess, 'run') as run:
+            self.assertEqual(sync.apply({'paused': True})['status'], 'paused')
+            run.assert_not_called()
+
+    def test_device_failure_and_timeout_do_not_block_others_and_retry_independently(self):
+        for failure in ('exit', 'timeout', 'mode'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                palette = home / '.local/state/omarchy/current/theme/colors.toml'
+                palette.parent.mkdir(parents=True)
+                palette.write_text('accent = "#123456"\n')
+                settings = {'devices': [{'name': 'Keyboard', 'mode': 'Invalid' if failure == 'mode' else 'Direct'},
+                                        {'name': 'Corsair RAM'}]}
+                fail_keyboard = True
+
+                def execute(command, **kwargs):
+                    if '--list-devices' in command:
+                        return subprocess.CompletedProcess(command, 0, '0: Keyboard\n  Modes: [Direct]\n1: Corsair RAM\n  Modes: [Direct]\n')
+                    if 'Keyboard' in command and fail_keyboard:
+                        if failure == 'timeout':
+                            raise subprocess.TimeoutExpired(command, 15)
+                        return subprocess.CompletedProcess(command, 1)
+                    return subprocess.CompletedProcess(command, 0)
+
+                with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
+                     patch.object(sync.subprocess, 'run', side_effect=execute) as run:
+                    result = sync.apply(settings)
+                    self.assertEqual(result['status'], 'partial')
+                    self.assertEqual(result['updated'], 1)
+                    self.assertEqual(result['failures'][0]['device'], 'Keyboard')
+                    run.reset_mock()
+                    result = sync.apply(settings, check=True)
+                    self.assertEqual(result['unchanged'], 1)
+                    self.assertFalse(any('Corsair RAM' in call.args[0] for call in run.call_args_list))
+                    fail_keyboard = False
+                    settings['devices'][0]['mode'] = 'Direct'
+                    run.reset_mock()
+                    result = sync.apply(settings, check=True)
+                    self.assertEqual(result['updated'], 1)
+                    self.assertEqual(result['unchanged'], 1)
+                    self.assertEqual(result['failures'], [])
+                    self.assertFalse(any('Corsair RAM' in call.args[0] for call in run.call_args_list))
+
+    def test_automatic_selector_cannot_reinclude_an_excluded_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            palette = home / '.local/state/omarchy/current/theme/colors.toml'
+            palette.parent.mkdir(parents=True)
+            palette.write_text('accent = "#123456"\n')
+            with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
+                 patch.object(sync.subprocess, 'run') as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = '0: RGB\n  Modes: [Direct]\n1: RGB Plus\n  Modes: [Direct]\n'
+                result = sync.apply({'disabledDevices': ['RGB Plus']})
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(result['status'], 'failed')
+                self.assertIn('excluded device', result['failures'][0]['error'])
+
     def test_managed_server_client_never_falls_back_to_local_detection(self):
         command = sync.build_command({'managedServer': True, 'devices': [{'name': 'Keyboard'}]}, '#123456')
         self.assertIn('--nodetect', command)
@@ -54,7 +126,7 @@ class SyncTests(unittest.TestCase):
                 run.return_value.stdout = '0: Keyboard\n  Type: Keyboard\n'
                 sync.apply({'devices': [{'name': 'Keyboard'}]})
                 self.assertEqual(run.call_args.args[0][-1], '123456')
-                self.assertEqual(run.call_args.kwargs['timeout'], 30)
+                self.assertEqual(run.call_args.kwargs['timeout'], 15)
                 run.return_value.returncode = 1
                 with self.assertRaises(RuntimeError):
                     sync.apply({'devices': [{'name': 'Keyboard'}]})
@@ -77,7 +149,7 @@ class SyncTests(unittest.TestCase):
                 sync.apply({'devices': [{'name': 'Keyboard'}, {'name': 'Corsair RAM'}]})
                 self.assertNotIn('Keyboard', run.call_args.args[0])
                 self.assertIn('Corsair RAM', run.call_args.args[0])
-                self.assertIn('Skipping unavailable device: Keyboard', (home / 'omarchy-rgb/last-sync.log').read_text())
+                self.assertIn('Failed: Keyboard: not currently detected', (home / 'omarchy-rgb/last-sync.log').read_text())
 
     def test_reconnect_and_resume_reapply_without_writing_on_every_poll(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -91,17 +163,17 @@ class SyncTests(unittest.TestCase):
                 run.return_value.returncode = 0
                 run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
                 sync.apply(settings)
-                self.assertEqual(run.call_count, 2)
+                self.assertEqual(run.call_count, 3)
                 run.reset_mock()
                 sync.apply(settings, check=True)
                 self.assertEqual(run.call_count, 1)  # discovery only
                 run.reset_mock()
                 sync.apply(settings)  # resume forces apply even if unchanged
-                self.assertEqual(run.call_count, 2)
+                self.assertEqual(run.call_count, 3)
                 run.return_value.stdout = '0: Corsair RAM\n1: Corsair RAM\n'
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 2)
+                self.assertEqual(run.call_count, 1)  # healthy RAM is not rewritten
                 run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
                 run.reset_mock()
                 sync.apply(settings, check=True)
@@ -117,7 +189,7 @@ class SyncTests(unittest.TestCase):
                 run.return_value.returncode = 0
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 2)  # retry after failure
+                self.assertEqual(run.call_count, 3)  # retry after failed discovery
 
 
 if __name__ == '__main__':
