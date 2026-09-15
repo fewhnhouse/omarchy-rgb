@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
 if not shutil.which('quickshell'):
     raise SystemExit('quickshell is required for this integration test')
@@ -18,6 +19,10 @@ with tempfile.TemporaryDirectory(prefix='rgb-service-') as directory:
     palette = root / '.local/state/omarchy/current/theme/colors.toml'
     palette.parent.mkdir(parents=True)
     palette.write_text('accent = "#4080c0"\n')
+    config = root / '.config/omarchy/shell.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'plugins': [{'id': 'io.github.fewhnhouse.omarchy-rgb',
+                                              'devices': [{'name': 'Test Keyboard'}]}]}))
     programs = {
         'openrgb': '''#!/usr/bin/env python3
 import json, os, sys, time
@@ -40,9 +45,7 @@ ShellRoot {
   Loader {
     id: plugin
     source: "%s"
-    onLoaded: item.settings = {devices: [{name: "Test Keyboard"}]}
   }
-  Timer { interval: 1200; running: true; onTriggered: plugin.item.settings = {devices: [{name: "Test Keyboard"}], brightness: 50} }
   Timer { interval: 10000; running: true; onTriggered: Qt.quit() }
 }
 ''' % (source / 'Service.qml').as_uri())
@@ -51,8 +54,16 @@ ShellRoot {
                QT_QPA_PLATFORMTHEME='', QT_QUICK_CONTROLS_STYLE='Basic',
                PATH=str(root / 'bin') + ':' + os.environ['PATH'],
                RGB_TEST_CALLS=str(root / 'calls.jsonl'))
+    def change_settings():
+        updated = config.with_suffix('.tmp')
+        updated.write_text(json.dumps({'plugins': [{'id': 'io.github.fewhnhouse.omarchy-rgb',
+                                                   'devices': [{'name': 'Test Keyboard'}], 'brightness': 50}]}))
+        updated.replace(config)
+    change = threading.Timer(1.2, change_settings)
+    change.start()
     result = subprocess.run(['quickshell', '--no-color', '-p', str(root / 'shell.qml')],
                             env=env, capture_output=True, text=True, timeout=15)
+    change.join()
     assert result.returncode == 0, result.stdout + result.stderr
     calls = [json.loads(line) for line in (root / 'calls.jsonl').read_text().splitlines()]
     assert len(calls) == 3, (calls, result.stdout, result.stderr)

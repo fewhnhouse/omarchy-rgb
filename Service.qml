@@ -6,6 +6,7 @@ import qs.Commons
 Item {
   id: root
   property var settings: ({})
+  property var manifest: null
   property bool pending: false
   property bool pendingForce: false
   property bool suspended: false
@@ -21,6 +22,25 @@ Item {
     if (server.running) {
       server.running = false
       serverRestart.restart()
+    }
+  }
+
+  // Omarchy injects settings into bar widgets, but not service entry points.
+  // Watch our own inline entry, including atomic shell.json replacements.
+  FileView {
+    id: configFile
+    path: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+    watchChanges: true
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var entries = JSON.parse(text()).plugins || []
+        var id = root.manifest ? root.manifest.id : "io.github.fewhnhouse.omarchy-rgb"
+        var next = entries.find(function(entry) { return entry.id === id }) || {}
+        if (JSON.stringify(next) !== JSON.stringify(root.settings)) root.settings = next
+      } catch (error) {
+        console.warn("Omarchy RGB Sync: cannot read settings:", error)
+      }
     }
   }
 
