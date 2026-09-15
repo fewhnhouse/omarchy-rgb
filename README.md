@@ -10,19 +10,16 @@ A small background service for Omarchy Quattro, powered by OpenRGB.
 - Skips configured devices absent from a fresh OpenRGB scan.
 - No bar widget, OpenRGB server, root process, or automatic package installation.
 
-## Known limitation: NZXT N7 Z790
+## Hardware compatibility
 
-**Lighting connected through the NZXT N7 Z790 motherboard controller is not
-currently supported by this plugin in our tested setup.** OpenRGB `1.0rc3-3`
-did not detect that controller (USB ID `1e71:201d`), so the plugin cannot sync
-fans or LED strips connected through it. Support remains unresolved; there is
-no confirmed workaround in this project yet.
+This plugin has been validated on a limited hardware setup, not across all
+hardware. Compatibility depends on what your installed version of OpenRGB
+supports and detects, including the device's connection type and available
+lighting modes. The plugin does not add hardware support beyond OpenRGB.
 
-The keyboard, Corsair RGB RAM, and Gigabyte GPU were detected independently
-and can still sync on that motherboard. This limitation concerns the N7 Z790
-controller tested here; compatibility with other NZXT devices has not been
-verified by this project. Check `openrgb --noautoconnect --list-devices` for
-your own hardware before configuring the plugin.
+Check `openrgb --noautoconnect --list-devices` for your own hardware before
+configuring the plugin. See [Tested hardware](#tested-hardware) for the devices
+used during development.
 
 ## Requirements
 
@@ -101,8 +98,8 @@ rm ~/.config/omarchy/hooks/post-boot.d/omarchy-rgb-sync
 The original hook was visually confirmed on Logitech G515 LS TKL, two Corsair
 Dominator Platinum RGB DDR5 sticks, and Gigabyte RTX 4070 SUPER GAMING OC.
 The plugin uses the same OpenRGB commands with configurable device selectors.
-For the motherboard controller, see [Known limitation: NZXT N7 Z790](#known-limitation-nzxt-n7-z790).
-Other hardware has not been verified by this project.
+Testing was limited to this setup. Compatibility with other hardware depends
+on OpenRGB support and has not been verified by this project.
 
 ## Troubleshooting
 
