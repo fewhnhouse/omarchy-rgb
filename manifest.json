@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.fewhnhouse.omarchy-rgb",
+  "name": "Omarchy RGB Sync",
+  "version": "0.1.0",
+  "author": "fewhnhouse",
+  "description": "Sync selected OpenRGB devices with your Omarchy theme accent. Configurable device modes and brightness, with no bar widget.",
+  "kinds": ["service"],
+  "entryPoints": {"service": "Service.qml"},
+  "license": "MIT"
+}
