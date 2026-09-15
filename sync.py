@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Apply the current Omarchy accent to discovered or explicitly selected OpenRGB devices."""
 import argparse
+from collections import Counter
 from datetime import datetime
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
+import socket
+import struct
 import subprocess
 import sys
 import time
@@ -94,7 +97,89 @@ def select_devices(settings, inventory):
     return devices
 
 
-def apply(settings, check=False):
+def recovery_step(state, settings, inventory, now, reconnect=False):
+    """Persist one staged recovery per absence; returning devices rearm it."""
+    path = state / 'recovery.json'
+    try:
+        history = json.loads(path.read_text())
+        if (not isinstance(history, dict) or not isinstance(history.get('known'), dict)
+                or any(not isinstance(n, str) or type(c) is not int or c < 1
+                       for n, c in history['known'].items())
+                or any(type(history[k]) not in (int, float)
+                       for k in ('since', 'rescanned', 'lastRestart') if k in history)
+                or not isinstance(history.get('handled', []), list)
+                or any(not isinstance(n, str) for n in history.get('handled', []))):
+            history = {}
+    except (OSError, ValueError):
+        history = {}
+    if not history:
+        # Preserve the last successful inventory on upgrade, even if the first
+        # server started by this version misses a previously working device.
+        known = {}
+        try:
+            groups = json.loads((state / 'last-applied.json').read_text())['groups']
+            for group in groups.values():
+                for name, count in Counter(group['devices']).items():
+                    if isinstance(name, str):
+                        known[name] = max(count, known.get(name, 0))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            known = {}
+        history['known'] = known
+    selected = select_devices(settings, inventory)
+    current = {d['name']: d['count'] for d in inventory
+               if any(isinstance(s, dict) and isinstance(s.get('name'), str)
+                      and s['name'] in d['name'] for s in selected)
+               and d['name'] not in settings.get('disabledDevices', [])}
+    known = history.setdefault('known', {})
+    automatic = settings.get('autoDetect', 'devices' not in settings)
+    for name in list(known):
+        if name in settings.get('disabledDevices', []) or (not automatic and not any(
+                isinstance(s, dict) and isinstance(s.get('name'), str) and s['name'] in name
+                for s in selected)):
+            del known[name]
+    for name, count in current.items():
+        known[name] = max(count, known.get(name, count))
+    missing = sorted(name for name, count in known.items() if current.get(name, 0) < count)
+    # Rearm only the devices that actually returned, not all devices when any
+    # inventory changes. An unplugged device cannot cause a restart loop.
+    handled = set(history.get('handled', [])) & set(missing)
+    if reconnect:
+        handled.clear()  # A resume/USB add can return hardware absent from the SDK cache.
+    unhandled = sorted(set(missing) - handled)
+    if history.get('pending') != unhandled:
+        history['since'] = now
+    history['pending'] = unhandled
+    action = ''
+    if not missing:
+        history.pop('since', None)
+        history.pop('rescanned', None)
+    elif history.get('rescanned') is not None:
+        if now - history['rescanned'] >= 15:
+            action = 'restart'
+            handled.update(missing)
+            history['lastRestart'] = now
+            history.pop('rescanned', None)
+    elif set(missing) - handled:
+        since = history.setdefault('since', now)
+        if now - since >= 15 and now - history.get('lastRestart', -900) >= 900:
+            action = 'rescan'
+            history['rescanned'] = now
+    history['handled'] = sorted(handled)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(history))
+    temporary.replace(path)
+    return {'action': action, 'missing': missing,
+            'retry': bool(unhandled) and not action and now - history.get('lastRestart', -900) >= 900}
+
+
+def request_rescan():
+    # OpenRGB SDK REQUEST_RESCAN_DEVICES (140), empty payload. The list-updated
+    # notification also fires at scan start, so do not treat it as completion.
+    with socket.create_connection(('127.0.0.1', 6742), timeout=5) as client:
+        client.sendall(struct.pack('<4sIII', b'ORGB', 0, 140, 0))
+
+
+def apply(settings, check=False, allow_recovery=False, reconnect=False):
     if not isinstance(settings, dict):
         raise ValueError('Settings must be a JSON object')
     if settings.get('paused', False):
@@ -127,6 +212,9 @@ def apply(settings, check=False):
                 # Validate shared settings once. Device-specific validation is
                 # inside the loop so one invalid mode/name cannot block others.
                 build_command(dict(settings, devices=[{'name': 'validation'}]), accent)
+                recovery = {'action': '', 'missing': []}
+                if allow_recovery and settings.get('managedServer') is True:
+                    recovery = recovery_step(state, settings, inventory, time.time(), reconnect)
                 cache = state / 'last-applied.json'
                 try:
                     previous = json.loads(cache.read_text())
@@ -184,6 +272,17 @@ def apply(settings, check=False):
                 if not requested:
                     status = 'idle'
                 summary = {'status': status, 'updated': updated, 'unchanged': unchanged, 'failures': failures}
+                if allow_recovery and settings.get('managedServer') is True:
+                    summary['recovery'] = recovery
+                    if recovery['action'] == 'rescan':
+                        # Finish color writes before replacing the SDK inventory.
+                        cache.unlink(missing_ok=True)
+                        try:
+                            request_rescan()
+                        except OSError as error:
+                            recovery['error'] = str(error)
+                    elif recovery['action'] == 'restart':
+                        cache.unlink(missing_ok=True)
                 log.write(json.dumps(summary) + '\n')
                 return summary
             except Exception as error:
@@ -196,9 +295,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--settings', default='{}', help='Inline plugin settings as JSON')
     parser.add_argument('--check', action='store_true', help='Only apply if selected devices or colors changed')
+    parser.add_argument('--allow-recovery', action='store_true', help='Service-owned server recovery handshake')
+    parser.add_argument('--reconnect', action='store_true', help='Retry missing devices after resume or USB add')
     args = parser.parse_args()
     try:
-        result = apply(json.loads(args.settings), check=args.check)
+        result = apply(json.loads(args.settings), check=args.check, allow_recovery=args.allow_recovery,
+                       reconnect=args.reconnect)
         print(json.dumps(result))
         if result.get('failures'):
             print('; '.join(f"{failure['device']}: {failure['error']}" for failure in result['failures']), file=sys.stderr)

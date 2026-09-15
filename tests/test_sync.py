@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,108 @@ spec.loader.exec_module(sync)
 
 
 class SyncTests(unittest.TestCase):
+    def test_recovery_migrates_previous_successful_inventory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / 'last-applied.json').write_text(json.dumps({'groups': {
+                'Keyboard': {'devices': ['Keyboard']}, 'RAM': {'devices': ['RAM', 'RAM']}}}))
+            inventory = sync.parse_inventory('0: RAM\n Modes: Direct\n1: RAM\n Modes: Direct\n')
+            self.assertEqual(sync.recovery_step(state, {}, inventory, 0)['missing'], ['Keyboard'])
+            self.assertEqual(sync.recovery_step(state, {}, inventory, 15)['action'], 'rescan')
+
+    def test_missing_device_recovery_is_staged_and_rearms_only_on_return(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            full = sync.parse_inventory('0: Keyboard\n Modes: Direct\n1: RAM\n Modes: Direct\n2: RAM\n Modes: Direct\n')
+            absent = full[1:]
+            step = lambda inventory, now: sync.recovery_step(state, {}, inventory, now)
+            self.assertEqual(step(full, 0)['missing'], [])
+            self.assertTrue(step(absent, 1)['retry'])
+            self.assertEqual(step(absent, 15)['action'], '')
+            self.assertEqual(step(absent, 16)['action'], 'rescan')
+            self.assertEqual(step(absent, 30)['action'], '')
+            self.assertEqual(step(absent, 31)['action'], 'restart')
+            for now in (32, 1000, 10000):
+                result = step(absent, now)
+                self.assertEqual(result['action'], '')
+                self.assertFalse(result['retry'])
+            step(full, 10001)
+            step(absent, 10002)
+            self.assertEqual(step(absent, 10017)['action'], 'rescan')
+            # A rescan that recovers the device avoids a restart.
+            self.assertEqual(step(full, 10032)['action'], '')
+
+    def test_recovery_cooldown_counts_and_selection_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            full = sync.parse_inventory('0: RAM\n Modes: Direct\n1: RAM\n Modes: Direct\n')
+            single = sync.parse_inventory('0: RAM\n Modes: Direct\n')
+            step = lambda inventory, now: sync.recovery_step(state, {}, inventory, now)
+            step(full, 0)
+            self.assertEqual(step(single, 1)['missing'], ['RAM'])
+            step(single, 16)
+            step(single, 31)
+            step(full, 32)
+            step(single, 33)
+            self.assertEqual(step(single, 930)['action'], '')
+            self.assertEqual(step(single, 931)['action'], 'rescan')
+            result = sync.recovery_step(state, {'disabledDevices': ['RAM']}, single, 946)
+            self.assertEqual(result['action'], '')
+            self.assertEqual(result['missing'], [])
+            step(full, 1000)
+            result = sync.recovery_step(state, {'devices': []}, [], 1001)
+            self.assertEqual(result['missing'], [])
+
+    def test_recovery_requires_service_opt_in_and_invalidates_color_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            palette = home / '.local/state/omarchy/current/theme/colors.toml'
+            palette.parent.mkdir(parents=True)
+            palette.write_text('accent = "#123456"\n')
+            with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
+                 patch.object(sync.subprocess, 'run') as run, \
+                 patch.object(sync, 'request_rescan') as rescan, \
+                 patch.object(sync.time, 'time', return_value=0) as now:
+                run.return_value.returncode = 0
+                run.return_value.stdout = '0: Keyboard\n Modes: Direct\n1: RAM\n Modes: Direct\n'
+                settings = {'managedServer': True}
+                sync.apply(settings, allow_recovery=True)
+                run.return_value.stdout = '0: RAM\n Modes: Direct\n'
+                now.return_value = 1
+                sync.apply(settings, allow_recovery=True)
+                now.return_value = 16
+                sync.apply(settings)  # Manual helper cannot initiate recovery.
+                rescan.assert_not_called()
+                result = sync.apply(settings, check=True, allow_recovery=True)
+                self.assertEqual(result['recovery']['action'], 'rescan')
+                rescan.assert_called_once()
+                self.assertFalse((home / 'omarchy-rgb/last-applied.json').exists())
+                now.return_value = 31
+                result = sync.apply(settings, allow_recovery=True)
+                self.assertEqual(result['recovery']['action'], 'restart')
+                self.assertFalse((home / 'omarchy-rgb/last-applied.json').exists())
+                result = sync.apply({}, allow_recovery=True)
+                self.assertNotIn('recovery', result)
+
+    def test_rescan_sdk_packet(self):
+        with patch.object(sync.socket, 'create_connection') as connect:
+            sync.request_rescan()
+            connect.assert_called_once_with(('127.0.0.1', 6742), timeout=5)
+            connect.return_value.__enter__.return_value.sendall.assert_called_once_with(
+                b'ORGB\x00\x00\x00\x00\x8c\x00\x00\x00\x00\x00\x00\x00')
+
+    def test_usb_return_rearms_cached_absence_without_bypassing_cooldown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            full = sync.parse_inventory('0: Keyboard\n Modes: Direct\n')
+            sync.recovery_step(state, {}, full, 0)
+            sync.recovery_step(state, {}, [], 1)
+            sync.recovery_step(state, {}, [], 16)
+            sync.recovery_step(state, {}, [], 31)
+            self.assertFalse(sync.recovery_step(state, {}, [], 32, reconnect=True)['retry'])
+            self.assertEqual(sync.recovery_step(state, {}, [], 930)['action'], '')
+            self.assertEqual(sync.recovery_step(state, {}, [], 931)['action'], 'rescan')
+
     def test_automatic_discovery_groups_devices_and_falls_back_to_static(self):
         inventory = sync.parse_inventory("0: Keyboard\n  Type: Keyboard\n  Modes: [Direct] Static 'Color Wave'\n"
                                          "1: RAM\n  Type: DRAM\n  Modes: [Static]\n"

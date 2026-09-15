@@ -9,14 +9,19 @@ Item {
   property var manifest: null
   property bool pending: false
   property bool pendingForce: false
+  property bool pendingReconnect: false
   property bool suspended: false
+  property bool recoveryWaiting: false
   property string lastError: ""
   readonly property string accent: String(Color.accent)
   readonly property string helperPath: decodeURIComponent(String(Qt.resolvedUrl("sync.py")).replace(/^file:\/\//, ""))
 
   readonly property int reconnectIntervalSec: Math.max(15, Number(settings.reconnectIntervalSec) || 60)
   readonly property bool managedServer: settings.managedServer === true
-  onManagedServerChanged: server.running = managedServer
+  onManagedServerChanged: {
+    server.running = managedServer
+    if (!managedServer) { recoveryWaiting = false; recoverySettle.stop() }
+  }
 
   // Omarchy injects settings into bar widgets, but not service entry points.
   // Watch our own inline entry, including atomic shell.json replacements.
@@ -43,7 +48,8 @@ Item {
     debounce.restart()
   }
 
-  function recover() {
+  function recover(reconnect) {
+    pendingReconnect = pendingReconnect || reconnect === true
     // Controllers and wireless receivers may take several seconds to wake.
     settle.restart()
     retry.restart()
@@ -56,12 +62,12 @@ Item {
       retry.stop()
     } else if (line.trim() === "boolean false") {
       suspended = false
-      recover()
+      recover(true)
     }
   }
 
   function deviceEvent(line) {
-    if (/^UDEV\s.*\s(add|remove|change)\s/.test(line)) recover()
+    if (/^UDEV\s.*\s(add|remove|change)\s/.test(line)) recover(/\sadd\s/.test(line))
   }
 
   onAccentChanged: scheduleSync()
@@ -72,10 +78,13 @@ Item {
     id: debounce
     interval: 500
     onTriggered: {
-      if (worker.running || root.suspended) return
+      if (worker.running || root.suspended || root.recoveryWaiting) return
       root.pending = false
       worker.command = ["python3", root.helperPath, "--settings", JSON.stringify(root.settings)]
       if (!root.pendingForce) worker.command = worker.command.concat(["--check"])
+      if (root.managedServer && server.running) worker.command = worker.command.concat(["--allow-recovery"])
+      if (root.pendingReconnect) worker.command = worker.command.concat(["--reconnect"])
+      root.pendingReconnect = false
       root.pendingForce = false
       worker.running = true
     }
@@ -83,17 +92,37 @@ Item {
 
   Process {
     id: worker
-    stdout: StdioCollector { }
+    stdout: StdioCollector { id: output }
     stderr: StdioCollector { id: errors }
     onExited: function(exitCode) {
       root.lastError = exitCode === 0 ? "" : errors.text.trim()
       if (root.lastError) console.warn("Omarchy RGB Sync:", root.lastError)
+      try {
+        var recovery = JSON.parse(output.text).recovery
+        if (recovery && root.managedServer && !root.settings.paused) {
+          if (recovery.action === "rescan") {
+            root.recoveryWaiting = true
+            recoverySettle.restart()
+          } else if (recovery.action === "restart" && server.running) {
+            // Stop only our Process object. Never kill other OpenRGB instances.
+            root.recoveryWaiting = true
+            server.running = false
+          } else if (recovery.retry && !retry.running) {
+            retry.restart()
+          }
+        }
+      } catch (error) { /* A failed helper may have no JSON output. */ }
       if (root.pending) debounce.restart()
     }
   }
 
   Timer { id: settle; interval: 2000; onTriggered: root.scheduleSync() }
   Timer { id: retry; interval: 15000; onTriggered: root.scheduleSync() }
+  Timer {
+    id: recoverySettle
+    interval: 15000
+    onTriggered: { root.recoveryWaiting = false; root.scheduleSync() }
+  }
 
   // Wireless wakeups do not always produce a udev event. Discover periodically,
   // but only write colors when the selected inventory or settings changed.
@@ -132,7 +161,7 @@ Item {
     running: root.managedServer
     stdout: StdioCollector { }
     stderr: StdioCollector { }
-    onStarted: root.recover()
+    onStarted: { root.recoveryWaiting = false; root.recover() }
     onExited: { if (root.managedServer) serverRestart.restart() }
   }
   Timer { id: serverRestart; interval: 10000; onTriggered: { if (root.managedServer) server.running = true } }

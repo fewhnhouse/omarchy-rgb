@@ -14,6 +14,7 @@ A small background service for Omarchy Quattro, powered by OpenRGB.
 - Retries failures without rewriting unchanged successful devices.
 - Skips configured devices absent from a fresh OpenRGB scan.
 - Optional local OpenRGB server for devices that restore onboard colors when OpenRGB exits.
+- Recovers previously detected devices missing from the managed server, with a rescan and guarded restart.
 - No bar widget, root process, or automatic package installation.
 
 ## Hardware compatibility
@@ -112,6 +113,25 @@ Do not run another OpenRGB instance or the old standalone hook alongside this
 option. A persistent connection avoids releasing control after every command;
 actual sleep/wake behavior still depends on the device and OpenRGB driver.
 
+### Devices disappear from the managed server
+
+With `managedServer` enabled, the service remembers selected device names and
+counts across shell restarts. If a previously detected device disappears, it
+allows at least 15 seconds for it to return, then requests an OpenRGB hardware
+rescan. It waits another 15 seconds before checking again. If the device is
+still missing, it restarts only the OpenRGB process launched by this plugin and
+reapplies the theme. Independently launched OpenRGB processes are never stopped.
+
+Recovery runs once per disappearance, with at least 15 minutes between recovery
+restarts. Leaving a keyboard disconnected therefore does not cause a restart
+loop; detecting it again, a USB add event, or a system resume rearms recovery.
+The restart cooldown still applies after those events. Excluded or deselected devices are
+removed from this history. Healthy devices may briefly change lighting during a
+full rescan or server restart. The 15-second rescan wait is a settling delay,
+not a completion signal; unusually slow OpenRGB scans may need longer to finish.
+This cannot recover hardware that OpenRGB has never detected, or a device that
+remains in the server's inventory while becoming unresponsive.
+
 ## Behavior and limitations
 
 The helper reads `~/.local/state/omarchy/current/theme/colors.toml` after taking
@@ -120,7 +140,7 @@ the latest settings and palette. It writes its lock, latest log, and last
 successfully applied device/color snapshot under
 `${XDG_STATE_HOME:-~/.local/state}/omarchy-rgb/`.
 
-Each sync scans devices once (30-second timeout), then updates each selected
+Each sync lists devices once (30-second timeout), then updates each selected
 name group separately (15-second timeout per group). A missing device, invalid
 mode, nonzero exit, or timeout is recorded without blocking other groups.
 The log and helper result identify partial failures. Periodic checks retry failed
@@ -129,7 +149,9 @@ lighting is not rewritten. A discovery failure prevents updates for that run.
 
 Resume signals from logind and USB/HID events trigger recovery after 2 seconds
 and again after 15 seconds to allow controllers to initialize. Periodic discovery
-catches wireless devices whose receiver stays plugged in. Discovery compares
+catches inventory changes for wireless devices whose receiver stays plugged in.
+In managed-server mode, this list is OpenRGB's cached inventory; missing-device
+recovery above requests an actual hardware rescan when needed. Discovery compares
 each selected name group (including duplicate counts), settings, and colors with
 its last successful apply; unchanged lighting is not rewritten. A device that
 resets internally without an event or any detectable absence cannot be identified
@@ -184,6 +206,7 @@ folder; OpenRGB remains installed for other uses.
 ```bash
 python3 -m unittest discover -s tests -v
 python3 tests/smoke_service.py
+python3 tests/smoke_recovery.py
 omarchy plugin validate .
 ```
 
