@@ -4,11 +4,14 @@ Match your keyboard and PC lighting to the active Omarchy theme accent.
 A small background service for Omarchy Quattro, powered by OpenRGB.
 
 - Syncs when the shell starts and when the theme accent changes.
+- Reapplies after resume and USB/HID changes, with delayed recovery attempts.
+- Checks for wireless devices returning every 60 seconds without rewriting unchanged lighting.
 - Select devices by name, with a separate OpenRGB mode for each device.
 - Optional brightness scaling, including devices without a brightness control.
 - Debounces rapid changes, serializes calls, and limits OpenRGB runs to 30 seconds.
 - Skips configured devices absent from a fresh OpenRGB scan.
-- No bar widget, OpenRGB server, root process, or automatic package installation.
+- Optional local OpenRGB server for devices that restore onboard colors when OpenRGB exits.
+- No bar widget, root process, or automatic package installation.
 
 ## Hardware compatibility
 
@@ -23,7 +26,7 @@ used during development.
 
 ## Requirements
 
-Omarchy Quattro with shell plugins, Python 3.11+, and OpenRGB with working
+Omarchy Quattro with shell plugins, Python 3.11+, `dbus-monitor`, `udevadm`, and OpenRGB with working
 user access to your hardware. Tested with Arch OpenRGB `1.0rc3-3`.
 Hardware compatibility depends on OpenRGB and the connection type.
 
@@ -66,12 +69,28 @@ indices are intentionally rejected because enumeration order can change.
 `mode` defaults to `Direct`; use a mode reported by your device, such as `Static`,
 if Direct is unavailable. Brightness is a percentage from 0 to 100, applied to
 RGB channel values. The default is 100. Settings reload with the shell config.
+`reconnectIntervalSec` controls wireless device discovery (default 60, minimum 15).
+
+### Keyboard colors revert after a while
+
+Some devices need OpenRGB to remain running to retain software lighting control.
+The Logitech HID++ driver in OpenRGB 1.0rc3 releases software control and restores
+firmware mode when its owning process shuts down. For these devices, add
+`"managedServer": true` to the plugin entry. The service starts one background
+OpenRGB server bound to `127.0.0.1:6743`, and the helper connects to it without
+local hardware detection. `serverPort` can select a different unused port.
+The plugin owns this process and stops it when disabled; no system service is installed.
+
+Do not run another OpenRGB instance or the old standalone hook alongside this
+option. A persistent connection avoids releasing control after every command;
+actual sleep/wake behavior still depends on the device and OpenRGB driver.
 
 ## Behavior and limitations
 
 The helper reads `~/.local/state/omarchy/current/theme/colors.toml` after taking
 its lock. Theme accent changes during a running sync queue another run using
-the latest settings and palette. It writes only its lock and latest log under
+the latest settings and palette. It writes its lock, latest log, and last
+successfully applied device/color snapshot under
 `${XDG_STATE_HOME:-~/.local/state}/omarchy-rgb/`.
 
 Each sync scans devices, then applies the color to available selections. Each
@@ -79,9 +98,16 @@ OpenRGB process has a 30-second timeout (up to 60 seconds total). A device that
 disconnects between scanning and applying can still cause OpenRGB to report an
 error; the next theme change or plugin restart tries again.
 
+Resume signals from logind and USB/HID events trigger recovery after 2 seconds
+and again after 15 seconds to allow controllers to initialize. Periodic discovery
+catches wireless devices whose receiver stays plugged in. Discovery compares
+selected device names (including duplicate counts), settings, and colors with
+the last successful apply; unchanged lighting is not rewritten. A device that
+resets internally without an event or any detectable absence cannot be identified
+by discovery alone. Toggle the plugin off/on to force an update in that case.
+
 No device profiles are saved. Disabling the plugin stops future updates; lights
-retain the last applied color according to their firmware. There is no reconnect
-or resume watcher in this version. Toggle the plugin off/on to reapply if needed.
+retain the last applied color according to their firmware.
 Avoid running another RGB application or an old theme hook that controls the
 same devices at the same time.
 
@@ -128,6 +154,7 @@ folder; OpenRGB remains installed for other uses.
 
 ```bash
 python3 -m unittest discover -s tests -v
+python3 tests/smoke_service.py
 omarchy plugin validate .
 ```
 

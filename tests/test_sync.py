@@ -12,6 +12,14 @@ spec.loader.exec_module(sync)
 
 
 class SyncTests(unittest.TestCase):
+    def test_managed_server_client_never_falls_back_to_local_detection(self):
+        command = sync.build_command({'managedServer': True, 'devices': [{'name': 'Keyboard'}]}, '#123456')
+        self.assertIn('--nodetect', command)
+        self.assertIn('127.0.0.1:6743', command)
+        for port in [0, 70000, '6743', True]:
+            with self.subTest(port=port), self.assertRaises(ValueError):
+                sync.connection_args({'managedServer': True, 'serverPort': port})
+
     def test_names_are_literal_arguments_and_modes_are_per_device(self):
         settings = {'devices': [{'name': 'Keyboard $(touch nope)'}, {'name': 'RAM', 'mode': 'Static'}]}
         command = sync.build_command(settings, '#3264eb')
@@ -72,6 +80,46 @@ class SyncTests(unittest.TestCase):
                 self.assertNotIn('Keyboard', run.call_args.args[0])
                 self.assertIn('Corsair RAM', run.call_args.args[0])
                 self.assertIn('Skipping unavailable device: Keyboard', (home / 'omarchy-rgb/last-sync.log').read_text())
+
+    def test_reconnect_and_resume_reapply_without_writing_on_every_poll(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            palette = home / '.local/state/omarchy/current/theme/colors.toml'
+            palette.parent.mkdir(parents=True)
+            palette.write_text('accent = "#123456"\n')
+            settings = {'devices': [{'name': 'Keyboard'}, {'name': 'Corsair RAM'}]}
+            with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
+                 patch.object(sync.subprocess, 'run') as run:
+                run.return_value.returncode = 0
+                run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
+                sync.apply(settings)
+                self.assertEqual(run.call_count, 2)
+                run.reset_mock()
+                sync.apply(settings, check=True)
+                self.assertEqual(run.call_count, 1)  # discovery only
+                run.reset_mock()
+                sync.apply(settings)  # resume forces apply even if unchanged
+                self.assertEqual(run.call_count, 2)
+                run.return_value.stdout = '0: Corsair RAM\n1: Corsair RAM\n'
+                run.reset_mock()
+                sync.apply(settings, check=True)
+                self.assertEqual(run.call_count, 2)
+                run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
+                run.reset_mock()
+                sync.apply(settings, check=True)
+                self.assertEqual(run.call_count, 2)  # wireless keyboard returned
+                run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n'
+                run.reset_mock()
+                sync.apply(settings, check=True)
+                self.assertEqual(run.call_count, 2)  # duplicate count changed
+                run.return_value.returncode = 1
+                with self.assertRaises(RuntimeError):
+                    sync.apply(settings, check=True)
+                self.assertFalse((home / 'omarchy-rgb/last-applied.json').exists())
+                run.return_value.returncode = 0
+                run.reset_mock()
+                sync.apply(settings, check=True)
+                self.assertEqual(run.call_count, 2)  # retry after failure
 
 
 if __name__ == '__main__':

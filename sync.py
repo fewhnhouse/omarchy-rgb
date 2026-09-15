@@ -13,6 +13,17 @@ import time
 import tomllib
 
 
+def connection_args(settings):
+    if settings.get('managedServer', False) is not True:
+        return ['openrgb', '--noautoconnect']
+    port = settings.get('serverPort', 6743)
+    if type(port) is not int or not 1024 <= port <= 65535:
+        raise ValueError('serverPort must be an integer from 1024 to 65535')
+    # Never fall back to local detection when the server is unavailable: a
+    # second process can release firmware control when it exits.
+    return ['openrgb', '--noautoconnect', '--client', f'127.0.0.1:{port}', '--nodetect']
+
+
 def build_command(settings, accent):
     if not isinstance(settings, dict):
         raise ValueError('Settings must be a JSON object')
@@ -27,7 +38,7 @@ def build_command(settings, accent):
     if type(brightness) not in (int, float) or not 0 <= brightness <= 100:
         raise ValueError('brightness must be a number from 0 to 100')
     color = ''.join(f'{round(int(accent[i:i + 2], 16) * brightness / 100):02x}' for i in (1, 3, 5))
-    command = ['openrgb', '--noautoconnect']
+    command = connection_args(settings)
     for device in devices:
         if not isinstance(device, dict):
             raise ValueError('Each device must be an object with a name and optional mode')
@@ -42,7 +53,7 @@ def build_command(settings, accent):
     return command
 
 
-def apply(settings):
+def apply(settings, check=False):
     state = Path(os.environ.get('XDG_STATE_HOME') or Path.home() / '.local/state') / 'omarchy-rgb'
     state.mkdir(parents=True, exist_ok=True)
     with (state / 'sync.lock').open('w') as lock:
@@ -63,7 +74,7 @@ def apply(settings):
                     accent = tomllib.load(source).get('accent')
                 command = build_command(settings, accent)
                 inventory = subprocess.run(
-                    ['openrgb', '--noautoconnect', '--list-devices'],
+                    connection_args(settings) + ['--list-devices'],
                     stdout=subprocess.PIPE, stderr=log, text=True, timeout=30, check=False)
                 if inventory.returncode:
                     raise RuntimeError(f'OpenRGB device scan failed; see {log.name}')
@@ -75,15 +86,33 @@ def apply(settings):
                     else:
                         log.write(f"Skipping unavailable device: {device['name']}\n")
                 if not available:
+                    (state / 'last-applied.json').unlink(missing_ok=True)
                     raise RuntimeError('None of the configured devices are currently detected')
                 command = build_command(dict(settings, devices=available), accent)
+                # Preserve duplicates: one of two identical RAM sticks may
+                # disappear and return. Forced resume/USB syncs bypass this.
+                selected_names = sorted(name for name in names if any(
+                    device['name'] in name for device in available))
+                fingerprint = {'command': command, 'devices': selected_names}
+                cache = state / 'last-applied.json'
+                try:
+                    previous = json.loads(cache.read_text())
+                except (OSError, ValueError):
+                    previous = None
+                if check and previous == fingerprint:
+                    log.write('Selected devices and color unchanged; no lighting writes\n')
+                    return
+                # Never suppress retry after a failed or interrupted apply.
+                cache.unlink(missing_ok=True)
                 log.write(f'Applying accent {accent}\n')
                 log.flush()
                 result = subprocess.run(command, stdout=log, stderr=log, timeout=30, check=False)
                 if result.returncode:
                     raise RuntimeError(f'OpenRGB exited with status {result.returncode}; see {log.name}')
                 log.write('OpenRGB completed successfully\n')
+                cache.write_text(json.dumps(fingerprint))
             except Exception as error:
+                (state / 'last-applied.json').unlink(missing_ok=True)
                 log.write(f'Error: {error}\n')
                 raise
 
@@ -91,9 +120,10 @@ def apply(settings):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--settings', default='{}', help='Inline plugin settings as JSON')
+    parser.add_argument('--check', action='store_true', help='Only apply if selected devices or colors changed')
     args = parser.parse_args()
     try:
-        apply(json.loads(args.settings))
+        apply(json.loads(args.settings), check=args.check)
     except (ValueError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(error, file=sys.stderr)
         return 1

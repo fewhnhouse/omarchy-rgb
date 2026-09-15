@@ -7,13 +7,48 @@ Item {
   id: root
   property var settings: ({})
   property bool pending: false
+  property bool pendingForce: false
+  property bool suspended: false
   property string lastError: ""
   readonly property string accent: String(Color.accent)
   readonly property string helperPath: decodeURIComponent(String(Qt.resolvedUrl("sync.py")).replace(/^file:\/\//, ""))
 
-  function scheduleSync() {
+  readonly property int reconnectIntervalSec: Math.max(15, Number(settings.reconnectIntervalSec) || 60)
+  readonly property bool managedServer: settings.managedServer === true
+  readonly property int serverPort: Number(settings.serverPort) || 6743
+  onManagedServerChanged: server.running = managedServer
+  onServerPortChanged: {
+    if (server.running) {
+      server.running = false
+      serverRestart.restart()
+    }
+  }
+
+  function scheduleSync(force) {
     pending = true
+    pendingForce = pendingForce || force !== false
     debounce.restart()
+  }
+
+  function recover() {
+    // Controllers and wireless receivers may take several seconds to wake.
+    settle.restart()
+    retry.restart()
+  }
+
+  function sleepEvent(line) {
+    if (line.trim() === "boolean true") {
+      suspended = true
+      settle.stop()
+      retry.stop()
+    } else if (line.trim() === "boolean false") {
+      suspended = false
+      recover()
+    }
+  }
+
+  function deviceEvent(line) {
+    if (/^UDEV\s.*\s(add|remove|change)\s/.test(line)) recover()
   }
 
   onAccentChanged: scheduleSync()
@@ -24,9 +59,11 @@ Item {
     id: debounce
     interval: 500
     onTriggered: {
-      if (worker.running) return
+      if (worker.running || root.suspended) return
       root.pending = false
       worker.command = ["python3", root.helperPath, "--settings", JSON.stringify(root.settings)]
+      if (!root.pendingForce) worker.command = worker.command.concat(["--check"])
+      root.pendingForce = false
       worker.running = true
     }
   }
@@ -41,4 +78,49 @@ Item {
       if (root.pending) debounce.restart()
     }
   }
+
+  Timer { id: settle; interval: 2000; onTriggered: root.scheduleSync() }
+  Timer { id: retry; interval: 15000; onTriggered: root.scheduleSync() }
+
+  // Wireless wakeups do not always produce a udev event. Discover periodically,
+  // but only write colors when the selected inventory or settings changed.
+  Timer {
+    interval: root.reconnectIntervalSec * 1000
+    running: !root.suspended
+    repeat: true
+    onTriggered: { if (!worker.running) root.scheduleSync(false) }
+  }
+
+  Process {
+    id: sleepMonitor
+    command: ["dbus-monitor", "--system", "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"]
+    running: true
+    stdout: SplitParser { onRead: function(line) { root.sleepEvent(line) } }
+    stderr: StdioCollector { }
+    onExited: sleepRestart.restart()
+  }
+  Timer { id: sleepRestart; interval: 5000; onTriggered: sleepMonitor.running = true }
+
+  Process {
+    id: deviceMonitor
+    command: ["udevadm", "monitor", "--udev", "--subsystem-match=usb", "--subsystem-match=hidraw"]
+    running: true
+    stdout: SplitParser { onRead: function(line) { root.deviceEvent(line) } }
+    stderr: StdioCollector { }
+    onExited: deviceRestart.restart()
+  }
+  Timer { id: deviceRestart; interval: 5000; onTriggered: deviceMonitor.running = true }
+
+  // Some devices restore onboard lighting when the owning OpenRGB process
+  // exits. Keep one owner alive; short-lived helpers connect as SDK clients.
+  Process {
+    id: server
+    command: ["openrgb", "--server", "--server-host", "127.0.0.1", "--server-port", String(root.serverPort), "--noautoconnect"]
+    running: root.managedServer
+    stdout: StdioCollector { }
+    stderr: StdioCollector { }
+    onStarted: root.recover()
+    onExited: { if (root.managedServer) serverRestart.restart() }
+  }
+  Timer { id: serverRestart; interval: 10000; onTriggered: { if (root.managedServer) server.running = true } }
 }
