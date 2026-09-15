@@ -16,12 +16,11 @@ import tomllib
 def connection_args(settings):
     if settings.get('managedServer', False) is not True:
         return ['openrgb', '--noautoconnect']
-    port = settings.get('serverPort', 6743)
-    if type(port) is not int or not 1024 <= port <= 65535:
-        raise ValueError('serverPort must be an integer from 1024 to 65535')
     # Never fall back to local detection when the server is unavailable: a
-    # second process can release firmware control when it exits.
-    return ['openrgb', '--noautoconnect', '--client', f'127.0.0.1:{port}', '--nodetect']
+    # second process can release firmware control when it exits. OpenRGB's
+    # auto-connect path waits for remote enumeration; --client in 1.0rc3 does
+    # not, so explicit --client + --nodetect can return an incomplete list.
+    return ['openrgb', '--nodetect']
 
 
 def build_command(settings, accent):

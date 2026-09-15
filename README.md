@@ -77,8 +77,9 @@ Some devices need OpenRGB to remain running to retain software lighting control.
 The Logitech HID++ driver in OpenRGB 1.0rc3 releases software control and restores
 firmware mode when its owning process shuts down. For these devices, add
 `"managedServer": true` to the plugin entry. The service starts one background
-OpenRGB server bound to `127.0.0.1:6743`, and the helper connects to it without
-local hardware detection. `serverPort` can select a different unused port.
+OpenRGB server bound to `127.0.0.1:6742`, and the helper connects through OpenRGB's
+default local-server discovery without local hardware detection. Port 6742 must
+be available before enabling this option.
 The plugin owns this process and stops it when disabled; no system service is installed.
 
 Do not run another OpenRGB instance or the old standalone hook alongside this

@@ -16,14 +16,7 @@ Item {
 
   readonly property int reconnectIntervalSec: Math.max(15, Number(settings.reconnectIntervalSec) || 60)
   readonly property bool managedServer: settings.managedServer === true
-  readonly property int serverPort: Number(settings.serverPort) || 6743
   onManagedServerChanged: server.running = managedServer
-  onServerPortChanged: {
-    if (server.running) {
-      server.running = false
-      serverRestart.restart()
-    }
-  }
 
   // Omarchy injects settings into bar widgets, but not service entry points.
   // Watch our own inline entry, including atomic shell.json replacements.
@@ -135,7 +128,7 @@ Item {
   // exits. Keep one owner alive; short-lived helpers connect as SDK clients.
   Process {
     id: server
-    command: ["openrgb", "--server", "--server-host", "127.0.0.1", "--server-port", String(root.serverPort), "--noautoconnect"]
+    command: ["openrgb", "--server", "--server-host", "127.0.0.1", "--server-port", "6742", "--noautoconnect"]
     running: root.managedServer
     stdout: StdioCollector { }
     stderr: StdioCollector { }

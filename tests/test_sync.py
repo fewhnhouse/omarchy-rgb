@@ -15,10 +15,8 @@ class SyncTests(unittest.TestCase):
     def test_managed_server_client_never_falls_back_to_local_detection(self):
         command = sync.build_command({'managedServer': True, 'devices': [{'name': 'Keyboard'}]}, '#123456')
         self.assertIn('--nodetect', command)
-        self.assertIn('127.0.0.1:6743', command)
-        for port in [0, 70000, '6743', True]:
-            with self.subTest(port=port), self.assertRaises(ValueError):
-                sync.connection_args({'managedServer': True, 'serverPort': port})
+        self.assertNotIn('--noautoconnect', command)
+        self.assertNotIn('--client', command)
 
     def test_names_are_literal_arguments_and_modes_are_per_device(self):
         settings = {'devices': [{'name': 'Keyboard $(touch nope)'}, {'name': 'RAM', 'mode': 'Static'}]}
