@@ -10,6 +10,20 @@ A small background service for Omarchy Quattro, powered by OpenRGB.
 - Skips configured devices absent from a fresh OpenRGB scan.
 - No bar widget, OpenRGB server, root process, or automatic package installation.
 
+## Known limitation: NZXT N7 Z790
+
+**Lighting connected through the NZXT N7 Z790 motherboard controller is not
+currently supported by this plugin in our tested setup.** OpenRGB `1.0rc3-3`
+did not detect that controller (USB ID `1e71:201d`), so the plugin cannot sync
+fans or LED strips connected through it. Support remains unresolved; there is
+no confirmed workaround in this project yet.
+
+The keyboard, Corsair RGB RAM, and Gigabyte GPU were detected independently
+and can still sync on that motherboard. This limitation concerns the N7 Z790
+controller tested here; compatibility with other NZXT devices has not been
+verified by this project. Check `openrgb --noautoconnect --list-devices` for
+your own hardware before configuring the plugin.
+
 ## Requirements
 
 Omarchy Quattro with shell plugins, Python 3.11+, and OpenRGB with working
@@ -87,8 +101,8 @@ rm ~/.config/omarchy/hooks/post-boot.d/omarchy-rgb-sync
 The original hook was visually confirmed on Logitech G515 LS TKL, two Corsair
 Dominator Platinum RGB DDR5 sticks, and Gigabyte RTX 4070 SUPER GAMING OC.
 The plugin uses the same OpenRGB commands with configurable device selectors.
-The NZXT N7 Z790 USB controller was not detected in that setup; this plugin does
-not add support for it. Other hardware has not been verified by this project.
+For the motherboard controller, see [Known limitation: NZXT N7 Z790](#known-limitation-nzxt-n7-z790).
+Other hardware has not been verified by this project.
 
 ## Troubleshooting
 
