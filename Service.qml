@@ -15,6 +15,42 @@ Item {
   property string lastError: ""
   readonly property string accent: String(Color.accent)
   readonly property string helperPath: decodeURIComponent(String(Qt.resolvedUrl("sync.py")).replace(/^file:\/\//, ""))
+  readonly property var processEnvironment: ({
+    PATH: "/usr/bin", HOME: Quickshell.env("HOME"),
+    XDG_CONFIG_HOME: Quickshell.env("XDG_CONFIG_HOME"),
+    XDG_STATE_HOME: Quickshell.env("XDG_STATE_HOME"),
+    XDG_RUNTIME_DIR: Quickshell.env("XDG_RUNTIME_DIR"),
+    DBUS_SESSION_BUS_ADDRESS: Quickshell.env("DBUS_SESSION_BUS_ADDRESS"),
+    DISPLAY: Quickshell.env("DISPLAY"), WAYLAND_DISPLAY: Quickshell.env("WAYLAND_DISPLAY"),
+    XAUTHORITY: Quickshell.env("XAUTHORITY"), LC_ALL: "C.UTF-8"
+  })
+  property string sleepBuffer: ""
+  property string deviceBuffer: ""
+  property bool sleepOverflow: false
+  property bool deviceOverflow: false
+
+  function monitorChunk(kind, chunk) {
+    // An undelimited or noisy monitor must never retain arbitrary output.
+    var buffer = kind === "sleep" ? sleepBuffer : deviceBuffer
+    var overflow = kind === "sleep" ? sleepOverflow : deviceOverflow
+    for (var i = 0; i < chunk.length; i++) {
+      var character = chunk[i]
+      if (character === "\n") {
+        if (!overflow) {
+          if (kind === "sleep") sleepEvent(buffer)
+          else deviceEvent(buffer)
+        }
+        buffer = ""
+        overflow = false
+      } else if (buffer.length < 512) {
+        buffer += character
+      } else {
+        overflow = true
+      }
+    }
+    if (kind === "sleep") { sleepBuffer = buffer; sleepOverflow = overflow }
+    else { deviceBuffer = buffer; deviceOverflow = overflow }
+  }
 
   readonly property int reconnectIntervalSec: Math.max(15, Number(settings.reconnectIntervalSec) || 60)
   readonly property bool managedServer: settings.managedServer === true
@@ -80,7 +116,7 @@ Item {
     onTriggered: {
       if (worker.running || root.suspended || root.recoveryWaiting) return
       root.pending = false
-      worker.command = ["python3", root.helperPath, "--settings", JSON.stringify(root.settings)]
+      worker.command = ["/usr/bin/python3", root.helperPath, "--settings", JSON.stringify(root.settings)]
       if (!root.pendingForce) worker.command = worker.command.concat(["--check"])
       if (root.managedServer && server.running) worker.command = worker.command.concat(["--allow-recovery"])
       if (root.pendingReconnect) worker.command = worker.command.concat(["--reconnect"])
@@ -92,6 +128,8 @@ Item {
 
   Process {
     id: worker
+    clearEnvironment: true
+    environment: root.processEnvironment
     stdout: StdioCollector { id: output }
     stderr: StdioCollector { id: errors }
     onExited: function(exitCode) {
@@ -135,21 +173,23 @@ Item {
 
   Process {
     id: sleepMonitor
-    command: ["dbus-monitor", "--system", "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"]
+    command: ["/usr/bin/dbus-monitor", "--system", "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'"]
+    clearEnvironment: true
+    environment: root.processEnvironment
     running: true
-    stdout: SplitParser { onRead: function(line) { root.sleepEvent(line) } }
-    stderr: StdioCollector { }
-    onExited: sleepRestart.restart()
+    stdout: SplitParser { splitMarker: ""; onRead: function(chunk) { root.monitorChunk("sleep", chunk) } }
+    onExited: { root.sleepBuffer = ""; root.sleepOverflow = false; sleepRestart.restart() }
   }
   Timer { id: sleepRestart; interval: 5000; onTriggered: sleepMonitor.running = true }
 
   Process {
     id: deviceMonitor
-    command: ["udevadm", "monitor", "--udev", "--subsystem-match=usb", "--subsystem-match=hidraw"]
+    command: ["/usr/bin/udevadm", "monitor", "--udev", "--subsystem-match=usb", "--subsystem-match=hidraw"]
+    clearEnvironment: true
+    environment: root.processEnvironment
     running: true
-    stdout: SplitParser { onRead: function(line) { root.deviceEvent(line) } }
-    stderr: StdioCollector { }
-    onExited: deviceRestart.restart()
+    stdout: SplitParser { splitMarker: ""; onRead: function(chunk) { root.monitorChunk("device", chunk) } }
+    onExited: { root.deviceBuffer = ""; root.deviceOverflow = false; deviceRestart.restart() }
   }
   Timer { id: deviceRestart; interval: 5000; onTriggered: deviceMonitor.running = true }
 
@@ -157,10 +197,10 @@ Item {
   // exits. Keep one owner alive; short-lived helpers connect as SDK clients.
   Process {
     id: server
-    command: ["openrgb", "--server", "--server-host", "127.0.0.1", "--server-port", "6742", "--noautoconnect"]
+    command: ["/usr/bin/openrgb", "--server", "--server-host", "127.0.0.1", "--server-port", "6742", "--noautoconnect"]
+    clearEnvironment: true
+    environment: root.processEnvironment
     running: root.managedServer
-    stdout: StdioCollector { }
-    stderr: StdioCollector { }
     onStarted: { root.recoveryWaiting = false; root.recover() }
     onExited: { if (root.managedServer) serverRestart.restart() }
   }

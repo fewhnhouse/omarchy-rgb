@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,6 +14,27 @@ spec.loader.exec_module(sync)
 
 
 class SyncTests(unittest.TestCase):
+    def test_inventory_stream_is_bounded_and_uses_minimal_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (Path(directory) / 'scan.log').open('w') as log, patch.dict(
+                    os.environ, {'PATH': directory, 'PYTHONPATH': directory,
+                                 'LD_PRELOAD': directory, 'HOME': directory}):
+                script = ('import json, os; print(json.dumps({key: os.environ.get(key) '
+                          'for key in ("PATH", "PYTHONPATH", "LD_PRELOAD", "HOME")}))')
+                result = json.loads(sync.read_inventory([sys.executable, '-c', script], log))
+                self.assertEqual(result, {'PATH': '/usr/bin', 'PYTHONPATH': None,
+                                          'LD_PRELOAD': None, 'HOME': directory})
+                oversized = f'import sys; sys.stdout.write("X" * {sync.MAX_INVENTORY_BYTES + 1})'
+                with self.assertRaisesRegex(ValueError, 'exceeds'):
+                    sync.read_inventory([sys.executable, '-c', oversized], log)
+
+    def test_inventory_stream_times_out_and_reaps_child(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with (Path(directory) / 'scan.log').open('w') as log, \
+                 patch.object(sync.select, 'select', return_value=([], [], [])):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    sync.read_inventory([sys.executable, '-c', 'import time; time.sleep(10)'], log)
+
     def test_recovery_migrates_previous_successful_inventory(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory)
@@ -73,13 +95,14 @@ class SyncTests(unittest.TestCase):
             palette.write_text('accent = "#123456"\n')
             with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
                  patch.object(sync.subprocess, 'run') as run, \
+                 patch.object(sync, 'read_inventory') as inventory_scan, \
                  patch.object(sync, 'request_rescan') as rescan, \
                  patch.object(sync.time, 'time', return_value=0) as now:
                 run.return_value.returncode = 0
-                run.return_value.stdout = '0: Keyboard\n Modes: Direct\n1: RAM\n Modes: Direct\n'
+                inventory_scan.return_value = '0: Keyboard\n Modes: Direct\n1: RAM\n Modes: Direct\n'
                 settings = {'managedServer': True}
                 sync.apply(settings, allow_recovery=True)
-                run.return_value.stdout = '0: RAM\n Modes: Direct\n'
+                inventory_scan.return_value = '0: RAM\n Modes: Direct\n'
                 now.return_value = 1
                 sync.apply(settings, allow_recovery=True)
                 now.return_value = 16
@@ -129,9 +152,10 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(sync.select_devices({'disabledDevices': ['Keyboard', 'RAM']}, inventory), [])
 
     def test_pause_does_not_contact_hardware(self):
-        with patch.object(sync.subprocess, 'run') as run:
+        with patch.object(sync.subprocess, 'run') as run, patch.object(sync, 'read_inventory') as scan:
             self.assertEqual(sync.apply({'paused': True})['status'], 'paused')
             run.assert_not_called()
+            scan.assert_not_called()
 
     def test_device_failure_and_timeout_do_not_block_others_and_retry_independently(self):
         for failure in ('exit', 'timeout', 'mode'):
@@ -145,8 +169,6 @@ class SyncTests(unittest.TestCase):
                 fail_keyboard = True
 
                 def execute(command, **kwargs):
-                    if '--list-devices' in command:
-                        return subprocess.CompletedProcess(command, 0, '0: Keyboard\n  Modes: [Direct]\n1: Corsair RAM\n  Modes: [Direct]\n')
                     if 'Keyboard' in command and fail_keyboard:
                         if failure == 'timeout':
                             raise subprocess.TimeoutExpired(command, 15)
@@ -154,7 +176,8 @@ class SyncTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 0)
 
                 with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
-                     patch.object(sync.subprocess, 'run', side_effect=execute) as run:
+                     patch.object(sync.subprocess, 'run', side_effect=execute) as run, \
+                     patch.object(sync, 'read_inventory', return_value='0: Keyboard\n  Modes: [Direct]\n1: Corsair RAM\n  Modes: [Direct]\n'):
                     result = sync.apply(settings)
                     self.assertEqual(result['status'], 'partial')
                     self.assertEqual(result['updated'], 1)
@@ -179,11 +202,11 @@ class SyncTests(unittest.TestCase):
             palette.parent.mkdir(parents=True)
             palette.write_text('accent = "#123456"\n')
             with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
-                 patch.object(sync.subprocess, 'run') as run:
+                 patch.object(sync.subprocess, 'run') as run, \
+                 patch.object(sync, 'read_inventory', return_value='0: RGB\n  Modes: [Direct]\n1: RGB Plus\n  Modes: [Direct]\n'):
                 run.return_value.returncode = 0
-                run.return_value.stdout = '0: RGB\n  Modes: [Direct]\n1: RGB Plus\n  Modes: [Direct]\n'
                 result = sync.apply({'disabledDevices': ['RGB Plus']})
-                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_count, 0)
                 self.assertEqual(result['status'], 'failed')
                 self.assertIn('excluded device', result['failures'][0]['error'])
 
@@ -196,7 +219,7 @@ class SyncTests(unittest.TestCase):
     def test_names_are_literal_arguments_and_modes_are_per_device(self):
         settings = {'devices': [{'name': 'Keyboard $(touch nope)'}, {'name': 'RAM', 'mode': 'Static'}]}
         command = sync.build_command(settings, '#3264eb')
-        self.assertEqual(command, ['openrgb', '--noautoconnect', '--device', 'Keyboard $(touch nope)',
+        self.assertEqual(command, [sync.OPENRGB, '--noautoconnect', '--device', 'Keyboard $(touch nope)',
                                   '--mode', 'Direct', '--color', '3264eb', '--device', 'RAM',
                                   '--mode', 'Static', '--color', '3264eb'])
 
@@ -224,17 +247,18 @@ class SyncTests(unittest.TestCase):
             palette.parent.mkdir(parents=True)
             palette.write_text('accent = "#123456"\n')
             with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
-                 patch.object(sync.subprocess, 'run') as run:
+                 patch.object(sync.subprocess, 'run') as run, \
+                 patch.object(sync, 'read_inventory') as inventory_scan:
                 run.return_value.returncode = 0
-                run.return_value.stdout = '0: Keyboard\n  Type: Keyboard\n'
+                inventory_scan.return_value = '0: Keyboard\n  Type: Keyboard\n'
                 sync.apply({'devices': [{'name': 'Keyboard'}]})
                 self.assertEqual(run.call_args.args[0][-1], '123456')
                 self.assertEqual(run.call_args.kwargs['timeout'], 15)
-                run.return_value.returncode = 1
+                inventory_scan.side_effect = RuntimeError('OpenRGB device scan failed')
                 with self.assertRaises(RuntimeError):
                     sync.apply({'devices': [{'name': 'Keyboard'}]})
                 self.assertIn('scan failed', (home / 'omarchy-rgb/last-sync.log').read_text())
-                run.side_effect = subprocess.TimeoutExpired('openrgb', 30)
+                inventory_scan.side_effect = subprocess.TimeoutExpired(sync.OPENRGB, 30)
                 with self.assertRaises(subprocess.TimeoutExpired):
                     sync.apply({'devices': [{'name': 'Keyboard'}]})
                 self.assertIn('timed out', (home / 'omarchy-rgb/last-sync.log').read_text())
@@ -246,9 +270,9 @@ class SyncTests(unittest.TestCase):
             palette.parent.mkdir(parents=True)
             palette.write_text('accent = "#123456"\n')
             with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
-                 patch.object(sync.subprocess, 'run') as run:
+                 patch.object(sync.subprocess, 'run') as run, \
+                 patch.object(sync, 'read_inventory', return_value='0: Corsair RAM\n1: Corsair RAM\n'):
                 run.return_value.returncode = 0
-                run.return_value.stdout = '0: Corsair RAM\n1: Corsair RAM\n'
                 sync.apply({'devices': [{'name': 'Keyboard'}, {'name': 'Corsair RAM'}]})
                 self.assertNotIn('Keyboard', run.call_args.args[0])
                 self.assertIn('Corsair RAM', run.call_args.args[0])
@@ -262,37 +286,38 @@ class SyncTests(unittest.TestCase):
             palette.write_text('accent = "#123456"\n')
             settings = {'devices': [{'name': 'Keyboard'}, {'name': 'Corsair RAM'}]}
             with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
-                 patch.object(sync.subprocess, 'run') as run:
+                 patch.object(sync.subprocess, 'run') as run, \
+                 patch.object(sync, 'read_inventory') as inventory_scan:
                 run.return_value.returncode = 0
-                run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
+                inventory_scan.return_value = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
                 sync.apply(settings)
-                self.assertEqual(run.call_count, 3)
+                self.assertEqual(run.call_count, 2)
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 1)  # discovery only
+                self.assertEqual(run.call_count, 0)  # discovery only
                 run.reset_mock()
                 sync.apply(settings)  # resume forces apply even if unchanged
-                self.assertEqual(run.call_count, 3)
-                run.return_value.stdout = '0: Corsair RAM\n1: Corsair RAM\n'
+                self.assertEqual(run.call_count, 2)
+                inventory_scan.return_value = '0: Corsair RAM\n1: Corsair RAM\n'
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 1)  # healthy RAM is not rewritten
-                run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
+                self.assertEqual(run.call_count, 0)  # healthy RAM is not rewritten
+                inventory_scan.return_value = '0: Keyboard\n1: Corsair RAM\n2: Corsair RAM\n'
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 2)  # wireless keyboard returned
-                run.return_value.stdout = '0: Keyboard\n1: Corsair RAM\n'
+                self.assertEqual(run.call_count, 1)  # wireless keyboard returned
+                inventory_scan.return_value = '0: Keyboard\n1: Corsair RAM\n'
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 2)  # duplicate count changed
-                run.return_value.returncode = 1
+                self.assertEqual(run.call_count, 1)  # duplicate count changed
+                inventory_scan.side_effect = RuntimeError('OpenRGB device scan failed')
                 with self.assertRaises(RuntimeError):
                     sync.apply(settings, check=True)
                 self.assertFalse((home / 'omarchy-rgb/last-applied.json').exists())
-                run.return_value.returncode = 0
+                inventory_scan.side_effect = None
                 run.reset_mock()
                 sync.apply(settings, check=True)
-                self.assertEqual(run.call_count, 3)  # retry after failed discovery
+                self.assertEqual(run.call_count, 2)  # retry after failed discovery
 
 
 if __name__ == '__main__':

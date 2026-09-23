@@ -16,6 +16,12 @@ with tempfile.TemporaryDirectory(prefix='rgb-service-') as directory:
     (root / 'Commons').symlink_to(commons, target_is_directory=True)
     (root / 'runtime').mkdir(mode=0o700)
     (root / 'bin').mkdir()
+    service = (source / 'Service.qml').read_text()
+    for name in ('openrgb', 'dbus-monitor', 'udevadm'):
+        service = service.replace('/usr/bin/' + name, str(root / 'bin' / name))
+    (root / 'Service.qml').write_text(service)
+    (root / 'sync.py').write_text((source / 'sync.py').read_text().replace(
+        "OPENRGB = '/usr/bin/openrgb'", f"OPENRGB = {str(root / 'bin' / 'openrgb')!r}"))
     palette = root / '.local/state/omarchy/current/theme/colors.toml'
     palette.parent.mkdir(parents=True)
     palette.write_text('accent = "#4080c0"\n')
@@ -29,7 +35,7 @@ import json, os, sys, time
 if '--list-devices' in sys.argv:
     print('0: Test Keyboard\\n  Modes: [Direct] Static')
 else:
-    with open(os.environ['RGB_TEST_CALLS'], 'a') as log:
+    with open(os.path.join(os.environ['HOME'], 'calls.jsonl'), 'a') as log:
         log.write(json.dumps({'time': time.time(), 'args': sys.argv[1:]})+'\\n')
 ''',
         'dbus-monitor': '#!/bin/sh\nsleep 1\necho "   boolean true"\nsleep 1\necho "   boolean false"\nsleep 30\n',
@@ -48,12 +54,11 @@ ShellRoot {
   }
   Timer { interval: 10000; running: true; onTriggered: Qt.quit() }
 }
-''' % (source / 'Service.qml').as_uri())
+''' % (root / 'Service.qml').as_uri())
     env = dict(os.environ, HOME=directory, XDG_STATE_HOME=str(root / '.local/state'),
                XDG_RUNTIME_DIR=str(root / 'runtime'), QT_QPA_PLATFORM='offscreen',
                QT_QPA_PLATFORMTHEME='', QT_QUICK_CONTROLS_STYLE='Basic',
-               PATH=str(root / 'bin') + ':' + os.environ['PATH'],
-               RGB_TEST_CALLS=str(root / 'calls.jsonl'))
+               PATH=str(root / 'bin') + ':' + os.environ['PATH'])
     def change_settings():
         updated = config.with_suffix('.tmp')
         updated.write_text(json.dumps({'plugins': [{'id': 'io.github.fewhnhouse.omarchy-rgb',

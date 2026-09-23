@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import select
 import socket
 import struct
 import subprocess
@@ -15,15 +16,57 @@ import sys
 import time
 import tomllib
 
+OPENRGB = '/usr/bin/openrgb'
+MAX_INVENTORY_BYTES = 1024 * 1024
+PROCESS_ENV_KEYS = ('HOME', 'XDG_CONFIG_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
+                    'DBUS_SESSION_BUS_ADDRESS', 'DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY')
+
+
+def process_environment():
+    """Keep user session paths but discard executable and library overrides."""
+    environment = {key: os.environ[key] for key in PROCESS_ENV_KEYS if key in os.environ}
+    environment.update(PATH='/usr/bin', LC_ALL='C.UTF-8')
+    return environment
+
 
 def connection_args(settings):
     if settings.get('managedServer', False) is not True:
-        return ['openrgb', '--noautoconnect']
+        return [OPENRGB, '--noautoconnect']
     # Never fall back to local detection when the server is unavailable: a
     # second process can release firmware control when it exits. OpenRGB's
     # auto-connect path waits for remote enumeration; --client in 1.0rc3 does
     # not, so explicit --client + --nodetect can return an incomplete list.
-    return ['openrgb', '--nodetect']
+    return [OPENRGB, '--nodetect']
+
+
+def read_inventory(command, log):
+    """Read OpenRGB's inventory with a byte and wall-clock limit."""
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=log,
+                               env=process_environment())
+    deadline = time.monotonic() + 30
+    chunks = []
+    size = 0
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+                raise subprocess.TimeoutExpired(command, 30)
+            chunk = os.read(process.stdout.fileno(), min(65536, MAX_INVENTORY_BYTES - size + 1))
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_INVENTORY_BYTES:
+                raise ValueError(f'OpenRGB device inventory exceeds {MAX_INVENTORY_BYTES} bytes')
+            chunks.append(chunk)
+        remaining = max(0, deadline - time.monotonic())
+        if process.wait(timeout=remaining):
+            raise RuntimeError(f'OpenRGB device scan failed; see {log.name}')
+        return b''.join(chunks).decode('utf-8', errors='replace')
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        process.stdout.close()
 
 
 def build_command(settings, accent):
@@ -202,12 +245,7 @@ def apply(settings, check=False, allow_recovery=False, reconnect=False):
                 palette = Path.home() / '.local/state/omarchy/current/theme/colors.toml'
                 with palette.open('rb') as source:
                     accent = tomllib.load(source).get('accent')
-                inventory_result = subprocess.run(
-                    connection_args(settings) + ['--list-devices'],
-                    stdout=subprocess.PIPE, stderr=log, text=True, timeout=30, check=False)
-                if inventory_result.returncode:
-                    raise RuntimeError(f'OpenRGB device scan failed; see {log.name}')
-                inventory = parse_inventory(inventory_result.stdout)
+                inventory = parse_inventory(read_inventory(connection_args(settings) + ['--list-devices'], log))
                 requested = select_devices(settings, inventory)
                 # Validate shared settings once. Device-specific validation is
                 # inside the loop so one invalid mode/name cannot block others.
@@ -258,7 +296,8 @@ def apply(settings, check=False, allow_recovery=False, reconnect=False):
                             continue
                         log.write(f'Applying accent {accent} to {label}\n')
                         log.flush()
-                        result = subprocess.run(command, stdout=log, stderr=log, timeout=15, check=False)
+                        result = subprocess.run(command, stdout=log, stderr=log, timeout=15,
+                                                check=False, env=process_environment())
                         if result.returncode:
                             raise RuntimeError(f'OpenRGB exited with status {result.returncode}')
                         successful[label] = fingerprint

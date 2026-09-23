@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.fewhnhouse.omarchy-rgb",
   "name": "Omarchy RGB Sync",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "author": "fewhnhouse",
   "description": "Automatically sync compatible OpenRGB devices with your Omarchy theme, with resume recovery and independent device retries.",
   "kinds": ["service"],

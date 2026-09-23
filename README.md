@@ -33,6 +33,8 @@ used during development.
 Omarchy Quattro with shell plugins, Python 3.11+, `dbus-monitor`, `udevadm`, and OpenRGB with working
 user access to your hardware. Tested with Arch OpenRGB `1.0rc3-3`.
 Hardware compatibility depends on OpenRGB and the connection type.
+The service uses `/usr/bin/python3`, `/usr/bin/dbus-monitor`, `/usr/bin/udevadm`,
+and `/usr/bin/openrgb`; these paths must exist on your installation.
 
 ```bash
 omarchy pkg add openrgb

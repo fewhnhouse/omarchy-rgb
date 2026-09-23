@@ -12,7 +12,10 @@ with tempfile.TemporaryDirectory(prefix='rgb-recovery-') as directory:
     (root / 'Commons').symlink_to(Path(os.environ.get('OMARCHY_PATH', '/usr/share/omarchy')) / 'shell/Commons')
     (root / 'runtime').mkdir(mode=0o700)
     (root / 'bin').mkdir()
-    shutil.copy2(source / 'Service.qml', root / 'Service.qml')
+    service = (source / 'Service.qml').read_text()
+    for name in ('openrgb', 'dbus-monitor', 'udevadm'):
+        service = service.replace('/usr/bin/' + name, str(root / 'bin' / name))
+    (root / 'Service.qml').write_text(service)
     config = root / '.config/omarchy/shell.json'
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({'plugins': [{'id': 'io.github.fewhnhouse.omarchy-rgb', 'managedServer': True}]}))
