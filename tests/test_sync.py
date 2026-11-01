@@ -319,6 +319,24 @@ class SyncTests(unittest.TestCase):
                 sync.apply(settings, check=True)
                 self.assertEqual(run.call_count, 2)  # retry after failed discovery
 
+    def test_discovery_reads_modes_from_the_detailed_listing(self):
+        # OpenRGB 1.1 reduced --list-devices to names; modes need --list-detailed.
+        listings = {'--list-devices': '0: G515 LS TKL\n',
+                    '--list-detailed': "0: G515 LS TKL\n  Type:           Keyboard\n"
+                                       "  Modes: [Direct] Off Static Breathing 'Spectrum Cycle'\n"}
+        with tempfile.TemporaryDirectory() as directory:
+            palette = Path(directory) / '.local/state/omarchy/current/theme/colors.toml'
+            palette.parent.mkdir(parents=True)
+            palette.write_text('accent = "#3264eb"\n')
+            with patch.dict(os.environ, {'HOME': directory, 'XDG_STATE_HOME': directory}), \
+                 patch.object(sync.subprocess, 'run',
+                              side_effect=lambda command, **_: subprocess.CompletedProcess(command, 0)), \
+                 patch.object(sync, 'read_inventory',
+                              side_effect=lambda command, log: listings[command[-1]]):
+                result = sync.apply({})
+        self.assertEqual(result['status'], 'synced')
+        self.assertEqual(result['updated'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -24,21 +24,21 @@ hardware. Compatibility depends on what your installed version of OpenRGB
 supports and detects, including the device's connection type and available
 lighting modes. The plugin does not add hardware support beyond OpenRGB.
 
-Check `openrgb --noautoconnect --list-devices` for your own hardware before
+Check `openrgb --noautoconnect --list-detailed` for your own hardware before
 configuring the plugin. See [Tested hardware](#tested-hardware) for the devices
 used during development.
 
 ## Requirements
 
 Omarchy Quattro with shell plugins, Python 3.11+, `dbus-monitor`, `udevadm`, and OpenRGB with working
-user access to your hardware. Tested with Arch OpenRGB `1.0rc3-3`.
+user access to your hardware. Tested with Arch OpenRGB `1.1-1`.
 Hardware compatibility depends on OpenRGB and the connection type.
 The service uses `/usr/bin/python3`, `/usr/bin/dbus-monitor`, `/usr/bin/udevadm`,
 and `/usr/bin/openrgb`; these paths must exist on your installation.
 
 ```bash
 omarchy pkg add openrgb
-openrgb --noautoconnect --list-devices
+openrgb --noautoconnect --list-detailed
 ```
 
 Confirm your devices appear and note their names and available modes.

@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix='rgb-service-') as directory:
     programs = {
         'openrgb': '''#!/usr/bin/env python3
 import json, os, sys, time
-if '--list-devices' in sys.argv:
+if '--list-detailed' in sys.argv:
     print('0: Test Keyboard\\n  Modes: [Direct] Static')
 else:
     with open(os.path.join(os.environ['HOME'], 'calls.jsonl'), 'a') as log:
