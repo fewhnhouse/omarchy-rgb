@@ -245,7 +245,7 @@ def apply(settings, check=False, allow_recovery=False, reconnect=False):
                 palette = Path.home() / '.local/state/omarchy/current/theme/colors.toml'
                 with palette.open('rb') as source:
                     accent = tomllib.load(source).get('accent')
-                inventory = parse_inventory(read_inventory(connection_args(settings) + ['--list-devices'], log))
+                inventory = parse_inventory(read_inventory(connection_args(settings) + ['--list-detailed'], log))
                 requested = select_devices(settings, inventory)
                 # Validate shared settings once. Device-specific validation is
                 # inside the loop so one invalid mode/name cannot block others.
